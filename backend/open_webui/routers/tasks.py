@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import logging
 import re
 
@@ -36,6 +36,18 @@ from open_webui.config import (
     DEFAULT_VOICE_MODE_PROMPT_TEMPLATE,
 )
 
+from open_webui.tasks import (
+    get_task_state,
+    update_task_state,
+    stop_task,
+    stop_item_tasks,
+    list_task_ids_by_item_id,
+    get_task_state_by_chat_id,
+    TaskStatus,
+    TaskState,
+)
+from open_webui.models.chats import Chats
+
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +56,191 @@ router = APIRouter()
 
 ##################################
 #
-# Task Endpoints
+# Task Status Endpoints
+#
+##################################
+
+
+class TaskStatusResponse(BaseModel):
+    task_id: str
+    chat_id: Optional[str] = None
+    message_id: Optional[str] = None
+    status: str
+    created_at: float
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    error: Optional[str] = None
+    elapsed_time: Optional[float] = None
+
+
+@router.get("/status/chat/{chat_id}")
+async def get_chat_tasks(
+    request: Request,
+    chat_id: str,
+    user=Depends(get_verified_user)
+) -> List[TaskStatusResponse]:
+    """
+    Get all tasks for a specific chat.
+    Only the owner of the chat can access the tasks.
+    """
+    # Authorization: Check if user owns the chat
+    if not chat_id.startswith("local:"):
+        chat = Chats.get_chat_by_id(chat_id)
+        if chat and chat.user_id != user.id and user.role != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to access tasks for this chat"
+            )
+    
+    redis = getattr(request.app.state, "redis", None)
+    states = await get_task_state_by_chat_id(redis, chat_id)
+    
+    import time
+    result = []
+    for state in states:
+        elapsed_time = None
+        if state.started_at:
+            end_time = state.completed_at or time.time()
+            elapsed_time = end_time - state.started_at
+        
+        result.append(TaskStatusResponse(
+            task_id=state.task_id,
+            chat_id=state.chat_id,
+            message_id=state.message_id,
+            status=state.status.value if isinstance(state.status, TaskStatus) else state.status,
+            created_at=state.created_at,
+            started_at=state.started_at,
+            completed_at=state.completed_at,
+            error=state.error,
+            elapsed_time=elapsed_time,
+        ))
+    
+    return result
+
+
+@router.post("/status/chat/{chat_id}/cancel")
+async def cancel_chat_tasks(
+    request: Request,
+    chat_id: str,
+    user=Depends(get_verified_user)
+):
+    """
+    Cancel all running tasks for a specific chat.
+    """
+    # Authorization: Check if user owns the chat
+    if not chat_id.startswith("local:"):
+        chat = Chats.get_chat_by_id(chat_id)
+        if chat and chat.user_id != user.id and user.role != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to cancel tasks for this chat"
+            )
+    
+    redis = getattr(request.app.state, "redis", None)
+    result = await stop_item_tasks(redis, chat_id)
+    return result
+
+
+@router.get("/status/{task_id}")
+async def get_task_status(
+    request: Request,
+    task_id: str,
+    user=Depends(get_verified_user)
+) -> TaskStatusResponse:
+    """
+    Get the status of a specific task.
+    Only the owner of the chat can access the task status.
+    """
+    redis = getattr(request.app.state, "redis", None)
+    
+    state = await get_task_state(redis, task_id)
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found"
+        )
+    
+    # Authorization: Check if user owns the chat
+    if state.chat_id and not state.chat_id.startswith("local:"):
+        chat = Chats.get_chat_by_id(state.chat_id)
+        if chat and chat.user_id != user.id and user.role != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to access this task"
+            )
+    elif state.user_id and state.user_id != user.id and user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access this task"
+        )
+    
+    # Calculate elapsed time
+    import time
+    elapsed_time = None
+    if state.started_at:
+        end_time = state.completed_at or time.time()
+        elapsed_time = end_time - state.started_at
+    
+    return TaskStatusResponse(
+        task_id=state.task_id,
+        chat_id=state.chat_id,
+        message_id=state.message_id,
+        status=state.status.value if isinstance(state.status, TaskStatus) else state.status,
+        created_at=state.created_at,
+        started_at=state.started_at,
+        completed_at=state.completed_at,
+        error=state.error,
+        elapsed_time=elapsed_time,
+    )
+
+
+@router.post("/status/{task_id}/cancel")
+async def cancel_task(
+    request: Request,
+    task_id: str,
+    user=Depends(get_verified_user)
+):
+    """
+    Cancel a running task.
+    Only the owner of the chat can cancel the task.
+    """
+    redis = getattr(request.app.state, "redis", None)
+    
+    state = await get_task_state(redis, task_id)
+    if not state:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Task not found"
+        )
+    
+    # Authorization: Check if user owns the chat
+    if state.chat_id and not state.chat_id.startswith("local:"):
+        chat = Chats.get_chat_by_id(state.chat_id)
+        if chat and chat.user_id != user.id and user.role != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to cancel this task"
+            )
+    elif state.user_id and state.user_id != user.id and user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to cancel this task"
+        )
+    
+    # Check if task is already completed
+    if state.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+        return {
+            "status": True,
+            "message": f"Task {task_id} is already {state.status.value}"
+        }
+    
+    result = await stop_task(redis, task_id)
+    return result
+
+
+##################################
+#
+# Task Config Endpoints
 #
 ##################################
 

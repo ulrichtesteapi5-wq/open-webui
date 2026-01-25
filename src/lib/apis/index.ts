@@ -298,6 +298,150 @@ export const getTaskIdsByChatId = async (token: string, chat_id: string) => {
 	return res;
 };
 
+// ============================================================
+// Task Status API Functions (Server-Side Orchestration)
+// ============================================================
+
+export interface TaskStatusResponse {
+	task_id: string;
+	chat_id: string | null;
+	message_id: string | null;
+	status: 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled';
+	created_at: number;
+	started_at: number | null;
+	completed_at: number | null;
+	error: string | null;
+	elapsed_time: number | null;
+}
+
+export const getTaskStatus = async (token: string, taskId: string): Promise<TaskStatusResponse | null> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/tasks/status/${taskId}`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			...(token && { authorization: `Bearer ${token}` })
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			if ('detail' in err) {
+				error = err.detail;
+			} else {
+				error = err;
+			}
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const cancelTask = async (token: string, taskId: string) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/tasks/status/${taskId}/cancel`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			...(token && { authorization: `Bearer ${token}` })
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			if ('detail' in err) {
+				error = err.detail;
+			} else {
+				error = err;
+			}
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const getChatTasksStatus = async (token: string, chatId: string): Promise<TaskStatusResponse[]> => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/tasks/status/chat/${chatId}`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			...(token && { authorization: `Bearer ${token}` })
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			if ('detail' in err) {
+				error = err.detail;
+			} else {
+				error = err;
+			}
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res ?? [];
+};
+
+export const cancelChatTasks = async (token: string, chatId: string) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_BASE_URL}/api/v1/tasks/status/chat/${chatId}/cancel`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			...(token && { authorization: `Bearer ${token}` })
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			console.error(err);
+			if ('detail' in err) {
+				error = err.detail;
+			} else {
+				error = err;
+			}
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
 export const getToolServerData = async (token: string, url: string) => {
 	let error = null;
 

@@ -375,7 +375,10 @@ async def generate_chat_completion(
             task_id, _ = await create_task(
                 getattr(request.app.state, "redis", None),
                 ServerSideChatManager.orchestrate(snapshot, request.app.state),
-                id=chat_id
+                id=chat_id,
+                user_id=user.id,
+                message_id=metadata.get("message_id"),
+                metadata={"model_id": model_id},
             )
             return JSONResponse(
                 status_code=status.HTTP_202_ACCEPTED,

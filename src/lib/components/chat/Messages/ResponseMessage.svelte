@@ -70,6 +70,7 @@
 		files?: { type: string; url: string }[];
 		timestamp: number;
 		role: string;
+		statusLabel?: string; // SSO task status label
 		statusHistory?: {
 			done: boolean;
 			action: string;
@@ -647,6 +648,13 @@
 					<div>
 						{#if model?.info?.meta?.capabilities?.status_updates ?? true}
 							<StatusHistory statusHistory={message?.statusHistory} />
+						{/if}
+
+						{#if message?.statusLabel}
+							<div class="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 mb-2 animate-pulse">
+								<Spinner className="size-4" />
+								<span>{message.statusLabel}</span>
+							</div>
 						{/if}
 
 						{#if message?.files && message.files?.filter((f) => f.type === 'image').length > 0}
