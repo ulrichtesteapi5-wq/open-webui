@@ -77,6 +77,8 @@ class ServerSideChatManager:
         return {
             "form_data": json.loads(json.dumps(form_data)),
             "user_id": user.id,
+            "user_email": user.email,
+            "user_name": user.name,
             "user_role": user.role,
             "metadata": json.loads(json.dumps(metadata)),
             "model": json.loads(json.dumps(model)) if model else None,
@@ -97,6 +99,8 @@ class ServerSideChatManager:
         chat_id = snapshot.get("chat_id")
         message_id = snapshot.get("message_id")
         user_id = snapshot.get("user_id")
+        user_email = snapshot.get("user_email")
+        user_name = snapshot.get("user_name")
         user_role = snapshot.get("user_role")
 
         log.info(f"Starting server-side orchestration for chat {chat_id}, message {message_id}")
@@ -105,7 +109,7 @@ class ServerSideChatManager:
         metadata = snapshot["metadata"]
 
         # 2. Create User and Request objects
-        user = type('obj', (object,), {"id": user_id, "role": user_role})
+        user = type('obj', (object,), {"id": user_id, "email": user_email, "name": user_name, "role": user_role})
         
         class State:
             def __init__(self, metadata, snapshot):
