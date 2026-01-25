@@ -68,7 +68,7 @@
 		updateChatById,
 		updateChatFolderIdById
 	} from '$lib/apis/chats';
-	import { generateOpenAIChatCompletion } from '$lib/apis/openai';
+	import { chatCompletion } from '$lib/apis/openai';
 	import { processWeb, processWebSearch, processYoutubeVideo } from '$lib/apis/retrieval';
 	import { getAndUpdateUserLocation, getUserSettings } from '$lib/apis/users';
 	import {
@@ -77,12 +77,7 @@
 		chatAction,
 		generateMoACompletion,
 		stopTask,
-		getTaskIdsByChatId,
-		getTaskStatus,
-		cancelTask,
-		getChatTasksStatus,
-		cancelChatTasks,
-		type TaskStatusResponse
+		getTaskIdsByChatId
 	} from '$lib/apis';
 	import { getTools } from '$lib/apis/tools';
 	import { uploadFile } from '$lib/apis/files';
@@ -158,10 +153,6 @@
 	};
 
 	let taskIds = null;
-
-	// Server-Side Orchestration (SSO) tracking
-	let activeTaskStatuses: Map<string, TaskStatusResponse> = new Map();
-	let taskPollingIntervals: Map<string, ReturnType<typeof setInterval>> = new Map();
 
 	// Chat Input
 	let prompt = '';
@@ -559,144 +550,6 @@
 		}
 	};
 
-	// ============================================================
-	// Server-Side Orchestration (SSO) - Task Status Polling
-	// ============================================================
-
-	const TASK_POLLING_INTERVAL = 2000; // 2 seconds
-
-	const startTaskPolling = (taskId: string, messageId: string) => {
-		// Don't start if already polling this task
-		if (taskPollingIntervals.has(taskId)) {
-			return;
-		}
-
-		console.log(`[SSO] Starting polling for task ${taskId}`);
-
-		const pollTask = async () => {
-			try {
-				const status = await getTaskStatus(localStorage.token, taskId);
-				if (!status) {
-					stopTaskPolling(taskId);
-					return;
-				}
-
-				activeTaskStatuses.set(taskId, status);
-				activeTaskStatuses = activeTaskStatuses; // Trigger reactivity
-
-				// Update message based on status
-				if (messageId && history.messages[messageId]) {
-					const message = history.messages[messageId];
-					
-					if (status.status === 'queued') {
-						message.statusLabel = $i18n.t('Queued...');
-					} else if (status.status === 'processing') {
-						message.statusLabel = $i18n.t('Processing...');
-					}
-
-					// Handle terminal states
-					if (['completed', 'failed', 'cancelled'].includes(status.status)) {
-						stopTaskPolling(taskId);
-						delete message.statusLabel;
-
-						if (status.status === 'failed' && status.error) {
-							message.error = { content: status.error };
-							message.done = true;
-						} else if (status.status === 'cancelled') {
-							message.error = { content: $i18n.t('Task was cancelled') };
-							message.done = true;
-						}
-						// For 'completed', the message content comes through WebSocket events
-					}
-
-					history.messages[messageId] = message;
-				}
-			} catch (error) {
-				console.error(`[SSO] Error polling task ${taskId}:`, error);
-				stopTaskPolling(taskId);
-			}
-		};
-
-		// Initial poll
-		pollTask();
-
-		// Set up interval
-		const intervalId = setInterval(pollTask, TASK_POLLING_INTERVAL);
-		taskPollingIntervals.set(taskId, intervalId);
-	};
-
-	const stopTaskPolling = (taskId: string) => {
-		const intervalId = taskPollingIntervals.get(taskId);
-		if (intervalId) {
-			clearInterval(intervalId);
-			taskPollingIntervals.delete(taskId);
-			console.log(`[SSO] Stopped polling for task ${taskId}`);
-		}
-	};
-
-	const stopAllTaskPolling = () => {
-		taskPollingIntervals.forEach((intervalId, taskId) => {
-			clearInterval(intervalId);
-		});
-		taskPollingIntervals.clear();
-	};
-
-	const handleTaskCancellation = async (taskId: string) => {
-		try {
-			await cancelTask(localStorage.token, taskId);
-			stopTaskPolling(taskId);
-			toast.success($i18n.t('Task cancelled'));
-		} catch (error) {
-			console.error('[SSO] Error cancelling task:', error);
-			toast.error($i18n.t('Failed to cancel task'));
-		}
-	};
-
-	const handle202Response = (res: { status: string; task_id: string; chat_id: string; message_id: string }, responseMessageId: string) => {
-		if (res.status === 'processing' && res.task_id) {
-			// Start polling for this task
-			startTaskPolling(res.task_id, responseMessageId);
-			
-			// Track the task
-			if (taskIds) {
-				taskIds.push(res.task_id);
-			} else {
-				taskIds = [res.task_id];
-			}
-
-			// Update message to show processing state
-			if (history.messages[responseMessageId]) {
-				history.messages[responseMessageId].statusLabel = $i18n.t('Starting...');
-				history.messages[responseMessageId] = history.messages[responseMessageId];
-			}
-
-			return true; // Indicates 202 was handled
-		}
-		return false;
-	};
-
-	// Check for active tasks when loading a chat
-	const checkActiveTasksOnLoad = async (chatId: string) => {
-		if (!chatId || chatId.startsWith('local:')) return;
-
-		try {
-			const tasks = await getChatTasksStatus(localStorage.token, chatId);
-			const activeTasks = tasks.filter(t => ['queued', 'processing'].includes(t.status));
-
-			for (const task of activeTasks) {
-				if (task.message_id) {
-					startTaskPolling(task.task_id, task.message_id);
-				}
-			}
-
-			if (activeTasks.length > 0) {
-				toast.info($i18n.t('Found {{count}} active task(s) in progress', { count: activeTasks.length }));
-			}
-		} catch (error) {
-			console.error('[SSO] Error checking active tasks:', error);
-		}
-	};
-
 	$: if (selectedModels !== null) {
 		savedModelIds();
 	}
@@ -809,8 +662,6 @@
 			window.removeEventListener('message', onMessageHandler);
 			$socket?.off('events', chatEventHandler);
 			$audioQueue?.destroy();
-			// Stop all task polling when component is destroyed
-			stopAllTaskPolling();
 		} catch (e) {
 			console.error(e);
 		}
@@ -1316,9 +1167,6 @@
 						generating = true;
 					}
 				}
-
-				// Check for active SSO tasks and start polling if any
-				await checkActiveTasksOnLoad($chatId);
 
 				await tick();
 
@@ -2153,7 +2001,8 @@
 			}
 		}
 
-		const res = await generateOpenAIChatCompletion(
+		generating = true;
+		const [res, controller] = await chatCompletion(
 			localStorage.token,
 			{
 				stream: stream,
@@ -2237,25 +2086,52 @@
 
 			history.messages[responseMessageId] = responseMessage;
 			history.currentId = responseMessageId;
+			generating = false;
 
-			return null;
+			return [null, null];
 		});
 
+		generationController = controller;
+
 		if (res) {
-			if (res.error) {
-				await handleOpenAIError(res.error, responseMessage);
-			} else if (res.status === 'processing' && res.task_id) {
-				// Handle 202 Accepted response (Server-Side Orchestration)
-				handle202Response(res, responseMessageId);
-			} else {
-				// Normal response - track task_id if present
-				if (res.task_id) {
-					if (taskIds) {
-						taskIds.push(res.task_id);
-					} else {
-						taskIds = [res.task_id];
+			if (res.status === 202) {
+				const data = await res.json();
+				await handle202Response(data, responseMessageId);
+			} else if (res.ok) {
+				if (stream) {
+					const reader = await createOpenAITextStream(res.body, $settings.splitLargeDeltas ?? false);
+
+					for await (const update of reader) {
+						if (update.done) {
+							chatCompletionEventHandler({ ...update, done: true }, responseMessage, _chatId);
+						} else {
+							chatCompletionEventHandler(
+								{
+									...update,
+									choices: [{ delta: { content: update.value } }]
+								},
+								responseMessage,
+								_chatId
+							);
+						}
+					}
+				} else {
+					const data = await res.json();
+					chatCompletionEventHandler({ ...data, done: true }, responseMessage, _chatId);
+
+					// Normal response - track task_id if present
+					if (data.task_id) {
+						if (taskIds) {
+							taskIds.push(data.task_id);
+						} else {
+							taskIds = [data.task_id];
+						}
 					}
 				}
+			} else {
+				const error = await res.json();
+				await handleOpenAIError(error, responseMessage);
+				generating = false;
 			}
 		}
 
@@ -2303,6 +2179,25 @@
 		}
 
 		history.messages[responseMessage.id] = responseMessage;
+	};
+
+	const handle202Response = async (data, responseMessageId) => {
+		const responseMessage = history.messages[responseMessageId];
+
+		if (data?.task_id) {
+			if (taskIds) {
+				taskIds.push(data.task_id);
+			} else {
+				taskIds = [data.task_id];
+			}
+		}
+
+		if (responseMessage) {
+			responseMessage.done = false;
+			history.messages[responseMessageId] = responseMessage;
+		}
+
+		generating = true;
 	};
 
 	const stopResponse = async () => {

@@ -195,20 +195,6 @@ class ServerSideChatManager:
                 Chats.upsert_message_to_chat_by_id_and_message_id(
                     chat_id, message_id, {"error": {"content": error_message}, "done": True}
                 )
-            log.exception(f"Error in server-side orchestration: {e}")
-            
-            error_message = "An unexpected error occurred. Please try again."
-            if snapshot.get("form_data", {}).get("metadata", {}).get("task") == str(TASKS.MOA_RESPONSE_GENERATION):
-                error_message = "One of the agents failed to respond. Please try again."
-
-            event_emitter = get_event_emitter(metadata)
-            if event_emitter:
-                await event_emitter({"type": "chat:message:error", "data": {"error": {"content": error_message}}})
-            
-            if chat_id and message_id:
-                Chats.upsert_message_to_chat_by_id_and_message_id(
-                    chat_id, message_id, {"error": {"content": str(e)}, "done": True}
-                )
 
     @staticmethod
     async def periodic_zombie_cleanup(app):
