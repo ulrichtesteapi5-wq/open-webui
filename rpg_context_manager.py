@@ -1605,7 +1605,38 @@ Todo sumário DEVE ter um cabeçalho com DATA e HORA do jogo.
         self._last_stopwords_csv = ""
         self._session: Optional[aiohttp.ClientSession] = None
         self._qdrant_client: Optional["QdrantClient"] = None
+        self._qdrant_config_hash: str = ""
         self._zero_vector_cache: Optional[List[float]] = None
+        self._background_tasks: Set[asyncio.Task] = set()
+
+    def _create_background_task(self, coro: Awaitable[Any]) -> None:
+        """Helper to create safe background tasks."""
+        loop = asyncio.get_running_loop()
+        task = loop.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        task.add_done_callback(_log_task_exception)
+
+    async def _ensure_lock_manager(self):
+        """Ensure the correct lock manager is initialized."""
+        global _GLOBAL_LOCK_MANAGER, _GLOBAL_LOCK_INIT_GUARD
+        
+        if _GLOBAL_LOCK_MANAGER:
+            return
+
+        async with _GLOBAL_LOCK_INIT_GUARD:
+            if _GLOBAL_LOCK_MANAGER:
+                return
+            
+            if self.valves.redis_url and HAS_REDIS:
+                try:
+                    logger.info(f"Initializing Redis Lock Manager: {self.valves.redis_url}")
+                    _GLOBAL_LOCK_MANAGER = RedisLockManager(self.valves.redis_url)
+                except Exception as e:
+                    logger.error(f"Failed to init Redis Lock, falling back to Memory: {e}")
+                    _GLOBAL_LOCK_MANAGER = MemoryLockManager()
+            else:
+                _GLOBAL_LOCK_MANAGER = MemoryLockManager()
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -1619,6 +1650,23 @@ Todo sumário DEVE ter um cabeçalho com DATA e HORA do jogo.
         """Cleanup resources - call on shutdown."""
         if self._session and not self._session.closed:
             await self._session.close()
+
+        # Wait for background tasks
+        if self._background_tasks:
+            logger.info(f"Waiting for {len(self._background_tasks)} background tasks...")
+            # Cancel pending tasks to ensure quick shutdown if needed
+            for task in list(self._background_tasks):
+                if not task.done():
+                    task.cancel()
+            
+            # Wait with timeout
+            if self._background_tasks:
+                await asyncio.wait(list(self._background_tasks), timeout=5.0)
+
+        # Close global lock manager if it's ours
+        global _GLOBAL_LOCK_MANAGER
+        if _GLOBAL_LOCK_MANAGER:
+            await _GLOBAL_LOCK_MANAGER.close()
 
     def _get_stopwords(self) -> FrozenSet[str]:
         """Get stopwords set with caching."""
