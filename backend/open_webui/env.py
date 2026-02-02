@@ -363,6 +363,13 @@ ENABLE_SERVER_SIDE_ORCHESTRATION = (
     os.environ.get("ENABLE_SERVER_SIDE_ORCHESTRATION", "True").lower() == "true"
 )
 
+# Zombie cleanup configuration for slow models (e.g., Claude-Opus)
+# Grace period in seconds before marking a message as interrupted (default: 600s = 10 minutes)
+ZOMBIE_CLEANUP_GRACE_PERIOD = int(os.environ.get("ZOMBIE_CLEANUP_GRACE_PERIOD", "600"))
+
+# Scan interval in seconds for finding processing chats (default: 3600s = 1 hour)
+ZOMBIE_CLEANUP_SCAN_INTERVAL = int(os.environ.get("ZOMBIE_CLEANUP_SCAN_INTERVAL", "3600"))
+
 ENABLE_QUERIES_CACHE = os.environ.get("ENABLE_QUERIES_CACHE", "False").lower() == "true"
 
 RAG_SYSTEM_CONTEXT = os.environ.get("RAG_SYSTEM_CONTEXT", "False").lower() == "true"

@@ -3669,15 +3669,15 @@ async def process_chat_response(
                     "title": title,
                 }
 
-                if not ENABLE_REALTIME_CHAT_SAVE:
-                    # Save message in the database
-                    Chats.upsert_message_to_chat_by_id_and_message_id(
-                        metadata["chat_id"],
-                        metadata["message_id"],
-                        {
-                            "content": serialize_content_blocks(content_blocks),
-                        },
-                    )
+                # Save final message state in the database (ensure done=True)
+                Chats.upsert_message_to_chat_by_id_and_message_id(
+                    metadata["chat_id"],
+                    metadata["message_id"],
+                    {
+                        "content": serialize_content_blocks(content_blocks),
+                        "done": True,
+                    },
+                )
 
                 # Send a webhook notification if the user is not active
                 if not Users.is_user_active(user.id):
@@ -3707,15 +3707,15 @@ async def process_chat_response(
                 log.warning("Task was cancelled!")
                 await event_emitter({"type": "chat:tasks:cancel"})
 
-                if not ENABLE_REALTIME_CHAT_SAVE:
-                    # Save message in the database
-                    Chats.upsert_message_to_chat_by_id_and_message_id(
-                        metadata["chat_id"],
-                        metadata["message_id"],
-                        {
-                            "content": serialize_content_blocks(content_blocks),
-                        },
-                    )
+                # Save message state in the database (ensure done=True on cancel)
+                Chats.upsert_message_to_chat_by_id_and_message_id(
+                    metadata["chat_id"],
+                    metadata["message_id"],
+                    {
+                        "content": serialize_content_blocks(content_blocks),
+                        "done": True,
+                    },
+                )
 
             if response.background is not None:
                 await response.background()

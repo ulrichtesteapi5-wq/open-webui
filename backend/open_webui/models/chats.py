@@ -1,13 +1,13 @@
 import logging
-import json
 import time
 import uuid
 import contextlib
 from typing import Optional
 
 from sqlalchemy.orm import Session
-from open_webui.internal.db import Base, JSONField, get_db, get_db_context
-from open_webui.models.tags import TagModel, Tag, Tags
+from open_webui.env import ZOMBIE_CLEANUP_SCAN_INTERVAL
+from open_webui.internal.db import Base, get_db_context
+from open_webui.models.tags import TagModel, Tags
 from open_webui.models.folders import Folders
 from open_webui.utils.misc import (
     sanitize_data_for_db,
@@ -28,8 +28,7 @@ from sqlalchemy import (
     Index,
     UniqueConstraint,
 )
-from sqlalchemy import or_, func, select, and_, text
-from sqlalchemy.sql import exists
+from sqlalchemy import or_, and_, text
 from sqlalchemy.sql.expression import bindparam
 
 ####################
@@ -49,8 +48,8 @@ def chat_lock(chat_id: str):
     lock = None
     if redis_client:
         lock_key = f"lock:chat:{chat_id}"
-        lock = redis_client.lock(lock_key, timeout=10) # 10s timeout
-        
+        lock = redis_client.lock(lock_key, timeout=10)  # 10s timeout
+
     try:
         if lock:
             lock.acquire(blocking=True)
@@ -530,7 +529,9 @@ class ChatTable:
             history = chat.get("history", {})
 
             if message_id in history.get("messages", {}):
-                status_history = history["messages"][message_id].get("statusHistory", [])
+                status_history = history["messages"][message_id].get(
+                    "statusHistory", []
+                )
                 status_history.append(status)
                 history["messages"][message_id]["statusHistory"] = status_history
 
@@ -1080,29 +1081,23 @@ class ChatTable:
 
                 # Check if there are any tags to filter, it should have all the tags
                 if "none" in tag_ids:
-                    query = query.filter(
-                        text(
-                            """
+                    query = query.filter(text("""
                             NOT EXISTS (
                                 SELECT 1
                                 FROM json_each(Chat.meta, '$.tags') AS tag
                             )
-                            """
-                        )
-                    )
+                            """))
                 elif tag_ids:
                     query = query.filter(
                         and_(
                             *[
-                                text(
-                                    f"""
+                                text(f"""
                                     EXISTS (
                                         SELECT 1
                                         FROM json_each(Chat.meta, '$.tags') AS tag
                                         WHERE tag.value = :tag_id_{tag_idx}
                                     )
-                                    """
-                                ).params(**{f"tag_id_{tag_idx}": tag_id})
+                                    """).params(**{f"tag_id_{tag_idx}": tag_id})
                                 for tag_idx, tag_id in enumerate(tag_ids)
                             ]
                         )
@@ -1138,29 +1133,23 @@ class ChatTable:
 
                 # Check if there are any tags to filter, it should have all the tags
                 if "none" in tag_ids:
-                    query = query.filter(
-                        text(
-                            """
+                    query = query.filter(text("""
                             NOT EXISTS (
                                 SELECT 1
                                 FROM json_array_elements_text(Chat.meta->'tags') AS tag
                             )
-                            """
-                        )
-                    )
+                            """))
                 elif tag_ids:
                     query = query.filter(
                         and_(
                             *[
-                                text(
-                                    f"""
+                                text(f"""
                                     EXISTS (
                                         SELECT 1
                                         FROM json_array_elements_text(Chat.meta->'tags') AS tag
                                         WHERE tag = :tag_id_{tag_idx}
                                     )
-                                    """
-                                ).params(**{f"tag_id_{tag_idx}": tag_id})
+                                    """).params(**{f"tag_id_{tag_idx}": tag_id})
                                 for tag_idx, tag_id in enumerate(tag_ids)
                             ]
                         )
@@ -1256,7 +1245,7 @@ class ChatTable:
                 # SQLite JSON1 querying for tags within the meta JSON field
                 query = query.filter(
                     text(
-                        f"EXISTS (SELECT 1 FROM json_each(Chat.meta, '$.tags') WHERE json_each.value = :tag_id)"
+                        "EXISTS (SELECT 1 FROM json_each(Chat.meta, '$.tags') WHERE json_each.value = :tag_id)"
                     )
                 ).params(tag_id=tag_id)
             elif db.bind.dialect.name == "postgresql":
@@ -1311,7 +1300,7 @@ class ChatTable:
                 # SQLite JSON1 support for querying the tags inside the `meta` JSON field
                 query = query.filter(
                     text(
-                        f"EXISTS (SELECT 1 FROM json_each(Chat.meta, '$.tags') WHERE json_each.value = :tag_id)"
+                        "EXISTS (SELECT 1 FROM json_each(Chat.meta, '$.tags') WHERE json_each.value = :tag_id)"
                     )
                 ).params(tag_id=tag_id)
 
@@ -1550,21 +1539,25 @@ class ChatTable:
             # We can use a raw SQL query or SQLAlchemy's JSON support.
             # Since we want it to be efficient, let's use a heuristic or a specific index if we had one.
             # For now, we'll scan recently updated chats.
-            
+
             # dialect_name = db.bind.dialect.name
             # if dialect_name == "sqlite":
             #     ...
-            
-            # Simple approach: find chats updated in the last hour that might be processing
-            one_hour_ago = int(time.time()) - 3600
-            chats = db.query(Chat).filter(Chat.updated_at > one_hour_ago).all()
-            
+
+            # Optimized: scan interval is configurable via ZOMBIE_CLEANUP_SCAN_INTERVAL
+            # Default: 1 hour (3600s) to support slow models like Claude-Opus
+            scan_cutoff = int(time.time()) - ZOMBIE_CLEANUP_SCAN_INTERVAL
+            chats = db.query(Chat).filter(Chat.updated_at > scan_cutoff).all()
+
             processing_chat_ids = []
             for chat_item in chats:
                 history = chat_item.chat.get("history", {})
                 messages = history.get("messages", {})
                 for message in messages.values():
-                    if message.get("role") == "assistant" and message.get("done") is False:
+                    if (
+                        message.get("role") == "assistant"
+                        and message.get("done") is False
+                    ):
                         processing_chat_ids.append(chat_item.id)
                         break
             return processing_chat_ids
@@ -1575,7 +1568,9 @@ class ChatTable:
             message["done"] = True
             if "error" not in message:
                 message["error"] = {"content": "Interrupted: The server task was lost."}
-            self.upsert_message_to_chat_by_id_and_message_id(chat_id, message_id, message)
+            self.upsert_message_to_chat_by_id_and_message_id(
+                chat_id, message_id, message
+            )
 
     def delete_chat_file(
         self, chat_id: str, file_id: str, db: Optional[Session] = None

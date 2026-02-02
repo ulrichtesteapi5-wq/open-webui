@@ -7,12 +7,10 @@ import logging
 import time
 from enum import Enum
 from redis.asyncio import Redis
-from fastapi import Request
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, field, asdict
+from typing import List, Optional
+from dataclasses import dataclass, field
 
 from open_webui.env import REDIS_KEY_PREFIX
-
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +50,11 @@ class TaskState:
             "chat_id": self.chat_id,
             "message_id": self.message_id,
             "user_id": self.user_id,
-            "status": self.status.value if isinstance(self.status, TaskStatus) else self.status,
+            "status": (
+                self.status.value
+                if isinstance(self.status, TaskStatus)
+                else self.status
+            ),
             "created_at": self.created_at,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
@@ -117,9 +119,10 @@ async def redis_task_command_listener(app):
                     local_task.cancel()
                     # Update task state to cancelled
                     await update_task_state(
-                        redis, task_id,
+                        redis,
+                        task_id,
                         status=TaskStatus.CANCELLED,
-                        completed_at=time.time()
+                        completed_at=time.time(),
                     )
         except Exception as e:
             log.exception(f"Error handling distributed task command: {e}")
@@ -159,7 +162,7 @@ async def get_task_state(redis: Optional[Redis], task_id: str) -> Optional[TaskS
                 return TaskState.from_dict(json.loads(state_json))
         except Exception as e:
             log.error(f"Failed to get task state from Redis: {e}")
-    
+
     # Fallback to in-memory
     return task_states.get(task_id)
 
@@ -204,11 +207,13 @@ async def delete_task_state(redis: Optional[Redis], task_id: str) -> None:
             await redis.hdel(REDIS_TASK_STATE_KEY, task_id)
         except Exception as e:
             log.error(f"Failed to delete task state from Redis: {e}")
-    
+
     task_states.pop(task_id, None)
 
 
-async def get_task_state_by_chat_id(redis: Optional[Redis], chat_id: str) -> List[TaskState]:
+async def get_task_state_by_chat_id(
+    redis: Optional[Redis], chat_id: str
+) -> List[TaskState]:
     """
     Get all task states for a specific chat.
     """
@@ -235,7 +240,11 @@ async def cleanup_expired_task_states(redis: Optional[Redis]) -> int:
                 try:
                     state = TaskState.from_dict(json.loads(state_json))
                     # Clean up completed/failed/cancelled tasks older than TTL
-                    if state.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+                    if state.status in [
+                        TaskStatus.COMPLETED,
+                        TaskStatus.FAILED,
+                        TaskStatus.CANCELLED,
+                    ]:
                         age = current_time - (state.completed_at or state.created_at)
                         if age > state.ttl:
                             await delete_task_state(redis, task_id)
@@ -248,11 +257,15 @@ async def cleanup_expired_task_states(redis: Optional[Redis]) -> int:
         # In-memory cleanup
         expired_tasks = []
         for task_id, state in task_states.items():
-            if state.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+            if state.status in [
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            ]:
                 age = current_time - (state.completed_at or state.created_at)
                 if age > state.ttl:
                     expired_tasks.append(task_id)
-        
+
         for task_id in expired_tasks:
             task_states.pop(task_id, None)
             cleaned += 1
@@ -310,22 +323,25 @@ async def cleanup_task(redis, task_id: str, id=None):
                 exc = task.exception()
                 if exc:
                     await update_task_state(
-                        redis, task_id,
+                        redis,
+                        task_id,
                         status=TaskStatus.FAILED,
                         completed_at=time.time(),
-                        error=str(exc)
+                        error=str(exc),
                     )
                 else:
                     await update_task_state(
-                        redis, task_id,
+                        redis,
+                        task_id,
                         status=TaskStatus.COMPLETED,
-                        completed_at=time.time()
+                        completed_at=time.time(),
                     )
             elif task.cancelled():
                 await update_task_state(
-                    redis, task_id,
+                    redis,
+                    task_id,
                     status=TaskStatus.CANCELLED,
-                    completed_at=time.time()
+                    completed_at=time.time(),
                 )
         except Exception as e:
             log.error(f"Error updating task state on cleanup: {e}")
@@ -349,14 +365,14 @@ async def create_task(
     user_id: Optional[str] = None,
     message_id: Optional[str] = None,
     metadata: Optional[dict] = None,
-    ttl: int = DEFAULT_TASK_TTL
+    ttl: int = DEFAULT_TASK_TTL,
 ):
     """
     Create a new asyncio task and add it to the global task dictionary.
     Also creates and persists the task state.
     """
     task_id = str(uuid4())  # Generate a unique ID for the task
-    
+
     # Create task state with initial status
     task_state = TaskState(
         task_id=task_id,
@@ -369,16 +385,14 @@ async def create_task(
         ttl=ttl,
     )
     await save_task_state(redis, task_state)
-    
+
     # Create wrapper coroutine to track processing state
     async def tracked_coroutine():
         await update_task_state(
-            redis, task_id,
-            status=TaskStatus.PROCESSING,
-            started_at=time.time()
+            redis, task_id, status=TaskStatus.PROCESSING, started_at=time.time()
         )
         return await coroutine
-    
+
     task = asyncio.create_task(tracked_coroutine())  # Create the task
 
     # Add a done callback for cleanup
@@ -425,9 +439,7 @@ async def stop_task(redis, task_id: str):
     if redis:
         # Update state first
         await update_task_state(
-            redis, task_id,
-            status=TaskStatus.CANCELLED,
-            completed_at=time.time()
+            redis, task_id, status=TaskStatus.CANCELLED, completed_at=time.time()
         )
         # PUBSUB: All instances check if they have this task, and stop if so.
         await redis_send_command(
@@ -445,20 +457,16 @@ async def stop_task(redis, task_id: str):
         state = await get_task_state(None, task_id)
         if state:
             await update_task_state(
-                None, task_id,
-                status=TaskStatus.CANCELLED,
-                completed_at=time.time()
+                None, task_id, status=TaskStatus.CANCELLED, completed_at=time.time()
             )
             return {"status": True, "message": f"Task {task_id} marked as cancelled."}
         return {"status": False, "message": f"Task with ID {task_id} not found."}
 
     # Update state
     await update_task_state(
-        None, task_id,
-        status=TaskStatus.CANCELLED,
-        completed_at=time.time()
+        None, task_id, status=TaskStatus.CANCELLED, completed_at=time.time()
     )
-    
+
     tasks.pop(task_id, None)
     task.cancel()  # Request task cancellation
     try:
@@ -499,12 +507,18 @@ async def periodic_task_cleanup(app):
     Periodically clean up expired task states.
     Runs every 15 minutes.
     """
-    while True:
-        await asyncio.sleep(900)  # 15 minutes
-        try:
-            redis = getattr(app.state, "redis", None)
-            cleaned = await cleanup_expired_task_states(redis)
-            if cleaned > 0:
-                log.debug(f"Periodic cleanup: removed {cleaned} expired task states")
-        except Exception as e:
-            log.error(f"Error in periodic task cleanup: {e}")
+    try:
+        while True:
+            await asyncio.sleep(900)  # 15 minutes
+            try:
+                redis = getattr(app.state, "redis", None)
+                cleaned = await cleanup_expired_task_states(redis)
+                if cleaned > 0:
+                    log.debug(
+                        f"Periodic cleanup: removed {cleaned} expired task states"
+                    )
+            except Exception as e:
+                log.error(f"Error in periodic task cleanup: {e}")
+    except asyncio.CancelledError:
+        log.info("Periodic task cleanup cancelled, shutting down gracefully.")
+        raise

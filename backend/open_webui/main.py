@@ -651,6 +651,26 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Graceful shutdown: cancel active tasks and update their state
+    log.info("Shutting down: cancelling active tasks...")
+    from open_webui.tasks import tasks, update_task_state, TaskStatus
+    import time as time_module
+
+    for task_id, task in list(tasks.items()):
+        if not task.done():
+            log.info(f"Cancelling task {task_id}")
+            task.cancel()
+            try:
+                await update_task_state(
+                    app.state.redis,
+                    task_id,
+                    status=TaskStatus.CANCELLED,
+                    completed_at=time_module.time(),
+                    error="Server shutdown",
+                )
+            except Exception as e:
+                log.warning(f"Failed to update task state for {task_id}: {e}")
+
     if hasattr(app.state, "redis_task_command_listener"):
         app.state.redis_task_command_listener.cancel()
 

@@ -1620,20 +1620,24 @@ Todo sumário DEVE ter um cabeçalho com DATA e HORA do jogo.
     async def _ensure_lock_manager(self):
         """Ensure the correct lock manager is initialized."""
         global _GLOBAL_LOCK_MANAGER, _GLOBAL_LOCK_INIT_GUARD
-        
+
         if _GLOBAL_LOCK_MANAGER:
             return
 
         async with _GLOBAL_LOCK_INIT_GUARD:
             if _GLOBAL_LOCK_MANAGER:
                 return
-            
+
             if self.valves.redis_url and HAS_REDIS:
                 try:
-                    logger.info(f"Initializing Redis Lock Manager: {self.valves.redis_url}")
+                    logger.info(
+                        f"Initializing Redis Lock Manager: {self.valves.redis_url}"
+                    )
                     _GLOBAL_LOCK_MANAGER = RedisLockManager(self.valves.redis_url)
                 except Exception as e:
-                    logger.error(f"Failed to init Redis Lock, falling back to Memory: {e}")
+                    logger.error(
+                        f"Failed to init Redis Lock, falling back to Memory: {e}"
+                    )
                     _GLOBAL_LOCK_MANAGER = MemoryLockManager()
             else:
                 _GLOBAL_LOCK_MANAGER = MemoryLockManager()
@@ -1653,12 +1657,14 @@ Todo sumário DEVE ter um cabeçalho com DATA e HORA do jogo.
 
         # Wait for background tasks
         if self._background_tasks:
-            logger.info(f"Waiting for {len(self._background_tasks)} background tasks...")
+            logger.info(
+                f"Waiting for {len(self._background_tasks)} background tasks..."
+            )
             # Cancel pending tasks to ensure quick shutdown if needed
             for task in list(self._background_tasks):
                 if not task.done():
                     task.cancel()
-            
+
             # Wait with timeout
             if self._background_tasks:
                 await asyncio.wait(list(self._background_tasks), timeout=5.0)
@@ -3537,6 +3543,11 @@ Todo sumário DEVE ter um cabeçalho com DATA e HORA do jogo.
                     await self._emit_status(
                         __event_emitter__, f"⚠️ Erro: {str(e)[:100]}...", done=True
                     )
+                finally:
+                    # Cleanup: Close aiohttp session to prevent "Unclosed client session" error
+                    if self._session and not self._session.closed:
+                        await self._session.close()
+                        self._session = None
 
         # Suffix handling
         if self.valves.enable_suffix and self.valves.narrative_suffix:
