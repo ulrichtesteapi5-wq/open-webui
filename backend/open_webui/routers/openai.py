@@ -972,8 +972,11 @@ async def generate_chat_completion(
                     else:
                         return PlainTextResponse(status_code=r.status, content=response)
 
+            content_type = r.headers.get("Content-Type", "")
+            stream_requested = bool(form_data.get("stream"))
+
             # Check if response is SSE
-            if "text/event-stream" in r.headers.get("Content-Type", ""):
+            if "text/event-stream" in content_type or "application/x-ndjson" in content_type:
                 streaming = True
                 return StreamingResponse(
                     stream_chunks_handler(r.content),
@@ -983,15 +986,48 @@ async def generate_chat_completion(
                         cleanup_response, response=r, session=session
                     ),
                 )
-            else:
+
+            if stream_requested:
+                first_line = await r.content.readline()
+                stripped = first_line.lstrip()
+
+                if stripped.startswith(b"data:") or stripped.startswith(b":"):
+                    async def _stream_with_first_line():
+                        if first_line:
+                            yield first_line
+                        async for chunk in r.content.iter_any():
+                            if chunk:
+                                yield chunk
+
+                    streaming = True
+                    return StreamingResponse(
+                        _stream_with_first_line(),
+                        status_code=r.status,
+                        headers=dict(r.headers),
+                        background=BackgroundTask(
+                            cleanup_response, response=r, session=session
+                        ),
+                    )
+
+                remaining = await r.read()
+                body_bytes = first_line + remaining
                 try:
-                    response = await r.json()
+                    response = json.loads(body_bytes.decode("utf-8", "replace"))
                 except Exception as e:
                     log.error(e)
-                    response = await r.text()
+                    response = body_bytes.decode("utf-8", "replace")
 
                 await cleanup_response(r, session)
                 return response
+
+            try:
+                response = await r.json()
+            except Exception as e:
+                log.error(e)
+                response = await r.text()
+
+            await cleanup_response(r, session)
+            return response
         except Exception as e:
             log.exception(e)
             
@@ -1056,7 +1092,8 @@ async def embeddings(request: Request, form_data: dict, user):
             cookies=cookies,
         )
 
-        if "text/event-stream" in r.headers.get("Content-Type", ""):
+        content_type = r.headers.get("Content-Type", "")
+        if "text/event-stream" in content_type or "application/x-ndjson" in content_type:
             streaming = True
             return StreamingResponse(
                 r.content,
@@ -1147,8 +1184,15 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
             ssl=AIOHTTP_CLIENT_SESSION_SSL,
         )
 
+        content_type = r.headers.get("Content-Type", "")
+        stream_requested = False
+        try:
+            stream_requested = bool(json.loads(body).get("stream"))
+        except Exception:
+            stream_requested = False
+
         # Check if response is SSE
-        if "text/event-stream" in r.headers.get("Content-Type", ""):
+        if "text/event-stream" in content_type or "application/x-ndjson" in content_type:
             streaming = True
             return StreamingResponse(
                 r.content,
@@ -1158,11 +1202,35 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
                     cleanup_response, response=r, session=session
                 ),
             )
-        else:
+
+        if stream_requested:
+            first_line = await r.content.readline()
+            stripped = first_line.lstrip()
+
+            if stripped.startswith(b"data:") or stripped.startswith(b":"):
+                async def _stream_with_first_line():
+                    if first_line:
+                        yield first_line
+                    async for chunk in r.content.iter_any():
+                        if chunk:
+                            yield chunk
+
+                streaming = True
+                return StreamingResponse(
+                    _stream_with_first_line(),
+                    status_code=r.status,
+                    headers=dict(r.headers),
+                    background=BackgroundTask(
+                        cleanup_response, response=r, session=session
+                    ),
+                )
+
+            remaining = await r.read()
+            body_bytes = first_line + remaining
             try:
-                response_data = await r.json()
+                response_data = json.loads(body_bytes.decode("utf-8", "replace"))
             except Exception:
-                response_data = await r.text()
+                response_data = body_bytes.decode("utf-8", "replace")
 
             if r.status >= 400:
                 if isinstance(response_data, (dict, list)):
@@ -1173,6 +1241,21 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
                     )
 
             return response_data
+
+        try:
+            response_data = await r.json()
+        except Exception:
+            response_data = await r.text()
+
+        if r.status >= 400:
+            if isinstance(response_data, (dict, list)):
+                return JSONResponse(status_code=r.status, content=response_data)
+            else:
+                return PlainTextResponse(
+                    status_code=r.status, content=response_data
+                )
+
+        return response_data
 
     except Exception as e:
         log.exception(e)

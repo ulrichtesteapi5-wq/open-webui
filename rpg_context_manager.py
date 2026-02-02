@@ -762,9 +762,6 @@ async def call_llm_api(
                 return None
         return None
 
-    if session and not session.closed:
-        return await _execute_with_retry(session, timeout)
-
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=timeout)
     ) as s:
@@ -820,13 +817,10 @@ async def embed_with_retry(
 
     for attempt in range(max_retries):
         try:
-            if session and not session.closed:
-                return await _request(session)
-            else:
-                async with aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=timeout)
-                ) as s:
-                    return await _request(s)
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout)
+            ) as s:
+                return await _request(s)
         except ConnectionError:
             # Rate limited - exponential backoff with jitter
             jitter = random.uniform(RETRY_JITTER_MIN, RETRY_JITTER_MAX)

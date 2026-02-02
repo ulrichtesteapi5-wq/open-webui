@@ -2314,11 +2314,15 @@ async def process_chat_response(
 
             return response
 
+    content_type = response.headers.get("Content-Type", "")
+    stream_requested = bool(form_data.get("stream"))
+    is_stream_response = hasattr(response, "body_iterator")
+
     # Non standard response
     if not any(
-        content_type in response.headers["Content-Type"]
-        for content_type in ["text/event-stream", "application/x-ndjson"]
-    ):
+        allowed_type in content_type
+        for allowed_type in ["text/event-stream", "application/x-ndjson"]
+    ) and not (stream_requested and is_stream_response):
         return response
 
     oauth_token = None
@@ -2816,87 +2820,102 @@ async def process_chat_response(
                             delta_count = 0
                             last_delta_data = None
 
-                    async for line in response.body_iterator:
-                        line = (
-                            line.decode("utf-8", "replace")
-                            if isinstance(line, bytes)
-                            else line
+                    buffer = ""
+                    done = False
+
+                    async for chunk in response.body_iterator:
+                        chunk = (
+                            chunk.decode("utf-8", "replace")
+                            if isinstance(chunk, bytes)
+                            else chunk
                         )
-                        data = line
-
-                        # Skip empty lines
-                        if not data.strip():
+                        if not chunk:
                             continue
 
-                        # "data:" is the prefix for each event
-                        if not data.startswith("data:"):
-                            continue
+                        buffer += chunk
 
-                        # Remove the prefix
-                        data = data[len("data:") :].strip()
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            line = line.rstrip("\r")
 
-                        try:
-                            data = json.loads(data)
+                            # Skip empty lines or comments
+                            if not line.strip() or line.startswith(":"):
+                                continue
 
-                            data, _ = await process_filter_functions(
-                                request=request,
-                                filter_functions=filter_functions,
-                                filter_type="stream",
-                                form_data=data,
-                                extra_params={"__body__": form_data, **extra_params},
-                            )
+                            if line.startswith("data:"):
+                                data = line[len("data:") :].strip()
+                            elif line.strip() == "[DONE]":
+                                done = True
+                                break
+                            else:
+                                continue
 
-                            if data:
-                                if "event" in data and not getattr(
-                                    request.state, "direct", False
-                                ):
-                                    await event_emitter(data.get("event", {}))
+                            if data == "[DONE]":
+                                done = True
+                                break
 
-                                if "selected_model_id" in data:
-                                    model_id = data["selected_model_id"]
-                                    Chats.upsert_message_to_chat_by_id_and_message_id(
-                                        metadata["chat_id"],
-                                        metadata["message_id"],
-                                        {
-                                            "selectedModelId": model_id,
-                                        },
-                                    )
-                                    await event_emitter(
-                                        {
-                                            "type": "chat:completion",
-                                            "data": data,
-                                        }
-                                    )
-                                else:
-                                    choices = data.get("choices", [])
+                            try:
+                                data = json.loads(data)
 
-                                    # 17421
-                                    usage = data.get("usage", {}) or {}
-                                    usage.update(data.get("timings", {}))  # llama.cpp
-                                    if usage:
+                                data, _ = await process_filter_functions(
+                                    request=request,
+                                    filter_functions=filter_functions,
+                                    filter_type="stream",
+                                    form_data=data,
+                                    extra_params={"__body__": form_data, **extra_params},
+                                )
+
+                                if data:
+                                    if "event" in data and not getattr(
+                                        request.state, "direct", False
+                                    ):
+                                        await event_emitter(data.get("event", {}))
+
+                                    if "selected_model_id" in data:
+                                        model_id = data["selected_model_id"]
+                                        Chats.upsert_message_to_chat_by_id_and_message_id(
+                                            metadata["chat_id"],
+                                            metadata["message_id"],
+                                            {
+                                                "selectedModelId": model_id,
+                                            },
+                                        )
                                         await event_emitter(
                                             {
                                                 "type": "chat:completion",
-                                                "data": {
-                                                    "usage": usage,
-                                                },
+                                                "data": data,
                                             }
                                         )
+                                    else:
+                                        choices = data.get("choices", [])
 
-                                    if not choices:
-                                        error = data.get("error", {})
-                                        if error:
+                                        # 17421
+                                        usage = data.get("usage", {}) or {}
+                                        usage.update(data.get("timings", {}))  # llama.cpp
+                                        if usage:
                                             await event_emitter(
                                                 {
                                                     "type": "chat:completion",
                                                     "data": {
-                                                        "error": error,
+                                                        "usage": usage,
                                                     },
                                                 }
                                             )
-                                        continue
 
-                                    delta = choices[0].get("delta", {})
+                                        if not choices:
+                                            error = data.get("error", {})
+                                            if error:
+                                                await event_emitter(
+                                                    {
+                                                        "type": "chat:completion",
+                                                        "data": {
+                                                            "error": error,
+                                                        },
+                                                    }
+                                                )
+                                            continue
+
+                                        delta = choices[0].get("delta", {})
 
                                     # Handle delta annotations
                                     annotations = delta.get("annotations")
@@ -3203,13 +3222,18 @@ async def process_chat_response(
                                             "data": data,
                                         }
                                     )
-                        except Exception as e:
-                            done = "data: [DONE]" in line
-                            if done:
-                                pass
-                            else:
+                            except Exception as e:
                                 log.debug(f"Error: {e}")
                                 continue
+
+                        if done:
+                            break
+
+                    if not done and buffer.strip() in ("data: [DONE]", "[DONE]"):
+                        done = True
+
+                    if done:
+                        buffer = ""
                     await flush_pending_delta_data()
 
                     if content_blocks:

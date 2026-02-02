@@ -332,7 +332,7 @@ async def generate_function_chat_completion(
                 )
                 finish_message["choices"][0]["finish_reason"] = "stop"
                 yield f"data: {json.dumps(finish_message)}\n\n"
-                yield "data: [DONE]"
+                yield "data: [DONE]\n\n"
 
         return StreamingResponse(stream_content(), media_type="text/event-stream")
     else:
