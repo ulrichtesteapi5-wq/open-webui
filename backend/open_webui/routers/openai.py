@@ -989,6 +989,7 @@ async def generate_chat_completion(
 
             if stream_requested:
                 first_line = await r.content.readline()
+                log.info("STREAM_RAW_FIRST_LINE %r", first_line[:512])
                 stripped = first_line.lstrip()
 
                 if stripped.startswith(b"data:") or stripped.startswith(b":"):
@@ -1205,6 +1206,7 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
 
         if stream_requested:
             first_line = await r.content.readline()
+            log.info("STREAM_RAW_FIRST_LINE %r", first_line[:512])
             stripped = first_line.lstrip()
 
             if stripped.startswith(b"data:") or stripped.startswith(b":"):
