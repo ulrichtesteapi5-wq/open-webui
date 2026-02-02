@@ -699,9 +699,14 @@ async def call_llm_api(
         "temperature": temperature,
     }
 
-    async def _request(s: aiohttp.ClientSession) -> Optional[str]:
+    async def _request(s: aiohttp.ClientSession, req_timeout: int) -> Optional[str]:
         try:
-            async with s.post(url, headers=headers, json=payload) as resp:
+            async with s.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=req_timeout),
+            ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     choices = data.get("choices") or EMPTY_DICT_LIST
@@ -717,6 +722,9 @@ async def call_llm_api(
                         f"LLM API Terminal Error: {resp.status} - {error_text}"
                     )
                     return None
+        except asyncio.TimeoutError:
+            logger.warning(f"LLM API request timed out after {req_timeout}s")
+            raise ConnectionError("RETRYABLE_ERROR_TIMEOUT")
         except Exception as e:
             if "RETRYABLE_ERROR" in str(e):
                 raise e
@@ -725,10 +733,12 @@ async def call_llm_api(
 
     MAX_RETRIES = 3
 
-    async def _execute_with_retry(s: aiohttp.ClientSession) -> Optional[str]:
+    async def _execute_with_retry(
+        s: aiohttp.ClientSession, req_timeout: int
+    ) -> Optional[str]:
         for attempt in range(MAX_RETRIES + 1):
             try:
-                result = await _request(s)
+                result = await _request(s, req_timeout)
                 if result is not None:
                     return result
                 # If result is None, it was a terminal error
@@ -753,10 +763,12 @@ async def call_llm_api(
         return None
 
     if session and not session.closed:
-        return await _execute_with_retry(session)
+        return await _execute_with_retry(session, timeout)
 
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as s:
-        return await _execute_with_retry(s)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=timeout)
+    ) as s:
+        return await _execute_with_retry(s, timeout)
 
 
 async def embed_with_retry(
@@ -3759,6 +3771,57 @@ Todo sumário DEVE ter um cabeçalho com DATA e HORA do jogo.
             )
         await self._emit_status(emitter, status_msg, done=True)
 
+    async def _outlet_core(
+        self,
+        body: dict,
+        chat_id: str,
+        messages: List[dict],
+        __event_emitter__: Optional[Callable[[dict], Awaitable[None]]] = None,
+    ) -> None:
+        """
+        Core outlet logic, separated for timeout wrapping.
+        """
+        session, client = await self._get_session(), self._get_qdrant()
+        asst_text, user_text = self._extract_last_pair(messages)
+        if await self._should_skip_extraction(chat_id, asst_text, __event_emitter__):
+            return
+
+        await self._emit_status(
+            __event_emitter__, "🧠 Analisando consequências...", done=False
+        )
+        raw = await call_llm_api(
+            self.valves.llm_api_key,
+            self.valves.llm_api_base_url,
+            self.valves.extractor_model,
+            self.valves.fact_extraction_prompt,
+            EXTRACTION_USER_TEMPLATE.format(
+                user_message=_safe_truncate(user_text, MAX_USER_TEXT_EXTRACT),
+                assistant_response=_safe_truncate(asst_text, MAX_ASSISTANT_TEXT_EXTRACT),
+            ),
+            timeout=self.valves.api_timeout,
+            temperature=self.valves.llm_temperature,
+            session=session,
+        )
+        data = extract_json_object(raw or "")
+
+        t_num = await get_next_turn_number_async(
+            client, self.valves.qdrant_collection, chat_id
+        )
+        mems = self._build_memory_payloads(data, user_text, asst_text)
+
+        if mems:
+            await self._embed_and_save_memories(
+                session,
+                client,
+                chat_id,
+                mems,
+                t_num,
+                data,
+                __event_emitter__,
+            )
+            if t_num % self.valves.summary_interval_turns == 0:
+                await self._trigger_summarization(client, chat_id, t_num)
+
     async def outlet(
         self,
         body: dict,
@@ -3786,57 +3849,27 @@ Todo sumário DEVE ter um cabeçalho com DATA e HORA do jogo.
         if not messages:
             return body
 
+        # Use a reasonable timeout for the entire outlet operation
+        outlet_timeout = self.valves.api_timeout + 30  # Extra buffer for embeddings
+
         await self._ensure_lock_manager()
         if _GLOBAL_LOCK_MANAGER:
             lock = await _GLOBAL_LOCK_MANAGER.get_lock(chat_id)
 
             async with lock:
                 try:
-                    session, client = await self._get_session(), self._get_qdrant()
-                    asst_text, user_text = self._extract_last_pair(messages)
-                    if await self._should_skip_extraction(
-                        chat_id, asst_text, __event_emitter__
-                    ):
-                        return body
-
+                    # Wrap core logic with timeout to prevent hanging
+                    await asyncio.wait_for(
+                        self._outlet_core(body, chat_id, messages, __event_emitter__),
+                        timeout=outlet_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    self._log(f"Outlet Timeout after {outlet_timeout}s for chat {chat_id}")
                     await self._emit_status(
-                        __event_emitter__, "🧠 Analisando consequências...", done=False
+                        __event_emitter__,
+                        f"⚠️ Timeout: extração de memória excedeu {outlet_timeout}s",
+                        done=True,
                     )
-                    raw = await call_llm_api(
-                        self.valves.llm_api_key,
-                        self.valves.llm_api_base_url,
-                        self.valves.extractor_model,
-                        self.valves.fact_extraction_prompt,
-                        EXTRACTION_USER_TEMPLATE.format(
-                            user_message=_safe_truncate(
-                                user_text, MAX_USER_TEXT_EXTRACT
-                            ),
-                            assistant_response=_safe_truncate(
-                                asst_text, MAX_ASSISTANT_TEXT_EXTRACT
-                            ),
-                        ),
-                        temperature=self.valves.llm_temperature,
-                        session=session,
-                    )
-                    data = extract_json_object(raw or "")
-
-                    t_num = await get_next_turn_number_async(
-                        client, self.valves.qdrant_collection, chat_id
-                    )
-                    mems = self._build_memory_payloads(data, user_text, asst_text)
-
-                    if mems:
-                        await self._embed_and_save_memories(
-                            session,
-                            client,
-                            chat_id,
-                            mems,
-                            t_num,
-                            data,
-                            __event_emitter__,
-                        )
-                        if t_num % self.valves.summary_interval_turns == 0:
-                            await self._trigger_summarization(client, chat_id, t_num)
                 except Exception as e:
                     self._log(f"Outlet Error: {e}")
                     await self._emit_status(
