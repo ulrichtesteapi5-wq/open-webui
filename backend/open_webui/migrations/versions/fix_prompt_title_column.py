@@ -1,7 +1,7 @@
 """add title column to prompt table if missing
 
 Revision ID: fix_prompt_title
-Revises: 018012973d35
+Revises: c440947495f3
 Create Date: 2026-02-02
 
 """
@@ -14,7 +14,7 @@ from sqlalchemy import inspect
 
 # revision identifiers, used by Alembic.
 revision: str = "fix_prompt_title"
-down_revision: Union[str, None] = "018012973d35"
+down_revision: Union[str, None] = "c440947495f3"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
