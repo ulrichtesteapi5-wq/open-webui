@@ -2823,6 +2823,7 @@ async def process_chat_response(
                     log.info("STREAM_RESPONSE_HEADERS %s", dict(response.headers))
                     buffer = ""
                     done = False
+                    done_emitted = False
                     logged_first_chunk = False
 
                     async for chunk in response.body_iterator:
@@ -2897,6 +2898,15 @@ async def process_chat_response(
                                         )
                                     else:
                                         choices = data.get("choices", [])
+                                        finish_reason = None
+
+                                        for choice in choices:
+                                            if choice.get("finish_reason") is not None:
+                                                finish_reason = choice.get("finish_reason")
+                                                break
+
+                                        if data.get("done") is True or finish_reason:
+                                            done = True
 
                                         # 17421
                                         usage = data.get("usage", {}) or {}
@@ -3218,6 +3228,22 @@ async def process_chat_response(
                                                     content_blocks
                                                 ),
                                             }
+
+                                if done and not done_emitted:
+                                    done_emitted = True
+                                    await event_emitter(
+                                        {
+                                            "type": "chat:completion",
+                                            "data": {
+                                                "done": True,
+                                                **(
+                                                    {"finish_reason": finish_reason}
+                                                    if finish_reason
+                                                    else {}
+                                                ),
+                                            },
+                                        }
+                                    )
 
                                 if delta:
                                     delta_count += 1
