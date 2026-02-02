@@ -2820,10 +2820,19 @@ async def process_chat_response(
                             delta_count = 0
                             last_delta_data = None
 
+                    log.info("STREAM_RESPONSE_HEADERS %s", dict(response.headers))
                     buffer = ""
                     done = False
+                    logged_first_chunk = False
 
                     async for chunk in response.body_iterator:
+                        if not logged_first_chunk:
+                            try:
+                                log.info("STREAM_RAW_CHUNK %r", chunk[:512])
+                            except Exception:
+                                log.info("STREAM_RAW_CHUNK <unprintable>")
+                            logged_first_chunk = True
+
                         chunk = (
                             chunk.decode("utf-8", "replace")
                             if isinstance(chunk, bytes)
