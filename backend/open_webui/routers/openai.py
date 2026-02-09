@@ -538,10 +538,19 @@ async def get_all_models(request: Request, user: UserModel) -> dict[str, list]:
                         continue
 
                     if model_id and model_id not in models:
+                        # Preservar owned_by original para provedores não-OpenAI
+                        is_openai_first_party = (
+                            "api.openai.com"
+                            in request.app.state.config.OPENAI_API_BASE_URLS[idx]
+                        )
                         models[model_id] = {
                             **model,
                             "name": model.get("name", model_id),
-                            "owned_by": "openai",
+                            "owned_by": (
+                                "openai"
+                                if is_openai_first_party
+                                else model.get("owned_by", "openai")
+                            ),
                             "openai": model,
                             "connection_type": model.get("connection_type", "external"),
                             "urlIdx": idx,
@@ -1035,9 +1044,11 @@ async def generate_chat_completion(
     key = request.app.state.config.OPENAI_API_KEYS[idx]
 
     # Check if model is a reasoning model that needs special handling
-    if is_openai_reasoning_model(payload["model"]):
+    # Guard: only apply for first-party OpenAI/Azure (Piramyd não aceita max_completion_tokens)
+    is_first_party = "api.openai.com" in url or api_config.get("azure", False)
+    if is_openai_reasoning_model(payload["model"]) and is_first_party:
         payload = openai_reasoning_model_handler(payload)
-    elif "api.openai.com" not in url:
+    elif not is_first_party:
         # Remove "max_completion_tokens" from the payload for backward compatibility
         if "max_completion_tokens" in payload:
             payload["max_tokens"] = payload["max_completion_tokens"]
@@ -1084,6 +1095,11 @@ async def generate_chat_completion(
 
     payload = json.dumps(payload)
 
+    from open_webui.env import LLM_PROVIDER_RETRIES, LLM_PROVIDER_RETRY_DELAY
+
+    RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+    NON_RETRYABLE_STATUS_CODES = {400, 401, 403, 404, 422}
+
     r = None
     session = None
     streaming = False
@@ -1094,29 +1110,110 @@ async def generate_chat_completion(
             trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
         )
 
-        r = await session.request(
-            method="POST",
-            url=request_url,
-            data=payload,
-            headers=headers,
-            cookies=cookies,
-            ssl=AIOHTTP_CLIENT_SESSION_SSL,
-        )
+        # Smart Retry com Backoff Linear
+        last_error = None
+        for attempt in range(1, LLM_PROVIDER_RETRIES + 1):
+            try:
+                r = await session.request(
+                    method="POST",
+                    url=request_url,
+                    data=payload,
+                    headers=headers,
+                    cookies=cookies,
+                    ssl=AIOHTTP_CLIENT_SESSION_SSL,
+                )
 
-        # Check if response is SSE
-        if "text/event-stream" in r.headers.get("Content-Type", ""):
+                if r.status in NON_RETRYABLE_STATUS_CODES:
+                    break  # Permanent error
+
+                if r.status in RETRYABLE_STATUS_CODES:
+                    last_error = f"HTTP {r.status}"
+                    if attempt < LLM_PROVIDER_RETRIES:
+                        retry_after = r.headers.get("Retry-After")
+                        delay = (
+                            float(retry_after)
+                            if retry_after
+                            else LLM_PROVIDER_RETRY_DELAY * attempt
+                        )
+                        await cleanup_response(r, None)
+                        r = None
+                        log.warning(
+                            f"Retry {attempt}/{LLM_PROVIDER_RETRIES}: {last_error}, delay={delay}s"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    break  # Last attempt
+
+                break  # Success (2xx)
+
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                last_error = str(e)
+                if attempt < LLM_PROVIDER_RETRIES:
+                    await asyncio.sleep(LLM_PROVIDER_RETRY_DELAY * attempt)
+                else:
+                    raise
+
+        if r is None:
+            raise Exception(
+                f"All {LLM_PROVIDER_RETRIES} retries exhausted: {last_error}"
+            )
+
+        # Streaming Detection em 2 camadas
+        ct = r.headers.get("Content-Type", "").lower()
+        is_stream = None
+
+        # Camada 1: Header-based
+        if "text/event-stream" in ct or "application/x-ndjson" in ct:
+            is_stream = True
+        elif "application/json" in ct:
+            is_stream = False
+
+        # Camada 2: Content-based fallback
+        first_bytes = b""
+        if is_stream is None:
+            first_bytes = await r.content.read(64)
+            if first_bytes:
+                text = first_bytes.decode("utf-8", errors="ignore").strip()
+                if text.startswith("data:"):
+                    is_stream = True
+                elif text.startswith("{") and "\n{" in text:
+                    is_stream = True
+                else:
+                    is_stream = False
+            else:
+                is_stream = False
+
+        if is_stream:
             streaming = True
+
+            def prepend_handler(content):
+                async def _gen():
+                    if first_bytes:
+                        yield first_bytes
+                    async for chunk in stream_chunks_handler(content):
+                        yield chunk
+                return _gen()
+
             return StreamingResponse(
-                stream_wrapper(r, session, stream_chunks_handler),
+                stream_wrapper(r, session, prepend_handler if first_bytes else stream_chunks_handler),
                 status_code=r.status,
                 headers=dict(r.headers),
             )
         else:
             try:
-                response = await r.json()
+                if first_bytes:
+                    remaining = await r.content.read()
+                    full_body = first_bytes + remaining
+                    response = json.loads(full_body)
+                else:
+                    response = await r.json()
             except Exception as e:
                 log.error(e)
-                response = await r.text()
+                response = (
+                    await r.text()
+                    if not first_bytes
+                    else full_body.decode("utf-8", errors="ignore")
+                )
 
             if r.status >= 400:
                 if isinstance(response, (dict, list)):

@@ -762,3 +762,16 @@ async def generate_moa_response(
             status_code=status.HTTP_400_BAD_REQUEST,
             content={"detail": str(e)},
         )
+
+
+############################
+# SSO Metrics
+############################
+
+
+@router.get("/sso/metrics")
+async def get_sso_metrics(request: Request, user=Depends(get_admin_user)):
+    """Return SSO metrics for the current worker."""
+    from open_webui.tasks import TASK_METRICS
+
+    return TASK_METRICS

@@ -1712,3 +1712,35 @@ export const updateModelConfig = async (token: string, config: GlobalModelConfig
 
 	return res;
 };
+
+// ──────────────────────────────────────────────
+// SSO Task Status API
+// ──────────────────────────────────────────────
+
+export interface TaskStatusResponse {
+	task_id: string;
+	status: 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled';
+	created_at: number;
+	completed_at?: number;
+	error?: string;
+}
+
+export async function getTaskStatus(
+	token: string,
+	taskId: string
+): Promise<TaskStatusResponse> {
+	const res = await fetch(`${WEBUI_BASE_URL}/api/tasks/status/${taskId}`, {
+		headers: { Authorization: `Bearer ${token}` }
+	});
+	if (!res.ok) {
+		throw new Error(`Failed to get task status: ${res.status}`);
+	}
+	return res.json();
+}
+
+export async function cancelTask(token: string, taskId: string): Promise<void> {
+	await fetch(`${WEBUI_BASE_URL}/api/tasks/cancel/${taskId}`, {
+		method: 'POST',
+		headers: { Authorization: `Bearer ${token}` }
+	});
+}

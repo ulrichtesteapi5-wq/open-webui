@@ -544,7 +544,15 @@ from open_webui.tasks import (
     create_task,
     stop_task,
     list_tasks,
+    periodic_zombie_cleanup,
 )  # Import from tasks.py
+
+from open_webui.env import ENABLE_SERVER_SIDE_ORCHESTRATION
+
+from open_webui.utils.plugin import (
+    preload_active_filters,
+    redis_function_reload_listener,
+)
 
 from open_webui.utils.redis import get_sentinels_from_env
 
@@ -629,6 +637,17 @@ async def lifespan(app: FastAPI):
             redis_task_command_listener(app)
         )
 
+    # Phase 1: Preload active filters (after Redis, after install_dependencies)
+    await preload_active_filters(app)
+
+    # Phase 1: PubSub listener for cross-worker function reload
+    if app.state.redis is not None:
+        asyncio.create_task(redis_function_reload_listener(app))
+
+    # Phase 2: Periodic zombie cleanup
+    if ENABLE_SERVER_SIDE_ORCHESTRATION and app.state.redis is not None:
+        asyncio.create_task(periodic_zombie_cleanup(app))
+
     if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
         limiter = anyio.to_thread.current_default_thread_limiter()
         limiter.total_tokens = THREAD_POOL_SIZE
@@ -657,6 +676,17 @@ async def lifespan(app: FastAPI):
         )
 
     yield
+
+    # Phase 2: Graceful shutdown — cancel active SSO tasks for this worker
+    if ENABLE_SERVER_SIDE_ORCHESTRATION:
+        active_sso_tasks = [
+            t for t in asyncio.all_tasks() if t.get_name().startswith("sso_")
+        ]
+        for task in active_sso_tasks:
+            task.cancel()
+        if active_sso_tasks:
+            await asyncio.gather(*active_sso_tasks, return_exceptions=True)
+            log.info(f"Graceful shutdown: cancelled {len(active_sso_tasks)} SSO tasks")
 
     if hasattr(app.state, "redis_task_command_listener"):
         app.state.redis_task_command_listener.cancel()
@@ -1861,6 +1891,43 @@ async def chat_completion(
 # Alias for chat_completion (Legacy)
 generate_chat_completions = chat_completion
 generate_chat_completion = chat_completion
+
+
+async def generate_moa_completion(request, form_data, user):
+    """Orchestrate N models and aggregate responses server-side."""
+    from open_webui.tasks import TaskState, TaskStatus, save_task_state, SSO_INSTANCE_ID
+
+    models = form_data.get("models", [])
+    chat_id = form_data.get("chat_id", "")
+
+    parent_task = TaskState(
+        chat_id=chat_id,
+        message_id=form_data.get("message_id", ""),
+        user_id=user.id,
+        worker_id=SSO_INSTANCE_ID,
+        metadata={"type": "moa", "model_count": len(models)},
+    )
+
+    redis = getattr(request.app.state, "redis", None)
+    if redis:
+        await save_task_state(redis, parent_task, REDIS_KEY_PREFIX)
+
+    tasks = []
+    for model_id in models:
+        model_form = {**form_data, "model": model_id}
+        task = asyncio.create_task(chat_completion_handler(request, model_form, user))
+        tasks.append(task)
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    if redis:
+        import time as _time
+
+        parent_task.status = TaskStatus.COMPLETED
+        parent_task.completed_at = _time.time()
+        await save_task_state(redis, parent_task, REDIS_KEY_PREFIX)
+
+    return results
 
 
 @app.post("/api/chat/completed")

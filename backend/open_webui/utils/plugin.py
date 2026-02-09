@@ -345,6 +345,15 @@ def get_tool_module_from_cache(request, tool_id, load_from_db=True):
 
 
 def get_function_module_from_cache(request, function_id, load_from_db=True):
+    # EARLY RETURN: se já está preloaded, retornar sem query DB
+    if (
+        hasattr(request.app.state, "FUNCTIONS")
+        and function_id in request.app.state.FUNCTIONS
+    ):
+        cached = request.app.state.FUNCTIONS[function_id]
+        if getattr(cached, "_valves_preloaded", False):
+            return cached, None, None
+
     if load_from_db:
         # Always load from the database by default
         # This is useful for hooks like "inlet" or "outlet" where the content might change
@@ -450,3 +459,116 @@ def install_tool_and_function_dependencies():
         install_frontmatter_requirements(all_dependencies.strip(", "))
     except Exception as e:
         log.error(f"Error installing requirements: {e}")
+
+
+####################################
+# Preloaded Plugins + PubSub
+####################################
+
+
+async def preload_active_filters(app):
+    """Load all active filters into memory at startup."""
+    active_filters = Functions.get_functions_by_type("filter", active_only=True)
+    count = 0
+    for f in active_filters:
+        try:
+            function_module, function_type, frontmatter = load_function_module_by_id(
+                f.id, f.content
+            )
+            if function_module:
+                valves = Functions.get_function_valves_by_id(f.id)
+                if valves:
+                    ValvesClass = getattr(function_module, "Valves", None)
+                    if ValvesClass:
+                        function_module.valves = ValvesClass(
+                            **(valves if isinstance(valves, dict) else {})
+                        )
+                function_module._valves_preloaded = True
+
+                if not hasattr(app.state, "FUNCTIONS"):
+                    app.state.FUNCTIONS = {}
+                if not hasattr(app.state, "FUNCTION_CONTENTS"):
+                    app.state.FUNCTION_CONTENTS = {}
+
+                app.state.FUNCTIONS[f.id] = function_module
+                app.state.FUNCTION_CONTENTS[f.id] = f.content
+                count += 1
+        except Exception as e:
+            log.error(f"Failed to preload filter {f.id}: {e}")
+    log.info(f"Preloaded {count} active filters into memory")
+
+
+async def notify_function_reload(app, function_id: str):
+    """Publish reload event to all workers via Redis PubSub."""
+    from open_webui.env import REDIS_KEY_PREFIX
+
+    redis = getattr(app.state, "redis", None)
+    if redis:
+        import json as _json
+
+        await redis.publish(
+            f"{REDIS_KEY_PREFIX}:fn_reload",
+            _json.dumps({"function_id": function_id, "action": "reload"}),
+        )
+
+
+async def reload_function_in_memory(app, function_id: str):
+    """Reload a specific function from DB into memory."""
+    func = Functions.get_function_by_id(function_id)
+    if func and func.is_active:
+        try:
+            function_module, function_type, frontmatter = load_function_module_by_id(
+                func.id, func.content
+            )
+            if function_module:
+                valves = Functions.get_function_valves_by_id(func.id)
+                if valves:
+                    ValvesClass = getattr(function_module, "Valves", None)
+                    if ValvesClass:
+                        valves_data = valves if isinstance(valves, dict) else {}
+                        function_module.valves = ValvesClass(**valves_data)
+                function_module._valves_preloaded = True
+
+                if not hasattr(app.state, "FUNCTIONS"):
+                    app.state.FUNCTIONS = {}
+                if not hasattr(app.state, "FUNCTION_CONTENTS"):
+                    app.state.FUNCTION_CONTENTS = {}
+
+                app.state.FUNCTIONS[func.id] = function_module
+                app.state.FUNCTION_CONTENTS[func.id] = func.content
+                log.info(f"Reloaded function {function_id} in memory")
+        except Exception as e:
+            log.error(f"Failed to reload function {function_id}: {e}")
+    else:
+        if hasattr(app.state, "FUNCTIONS") and function_id in app.state.FUNCTIONS:
+            del app.state.FUNCTIONS[function_id]
+        if (
+            hasattr(app.state, "FUNCTION_CONTENTS")
+            and function_id in app.state.FUNCTION_CONTENTS
+        ):
+            del app.state.FUNCTION_CONTENTS[function_id]
+        log.info(f"Removed function {function_id} from memory")
+
+
+async def redis_function_reload_listener(app):
+    """Listen for function reload events from Redis PubSub."""
+    from open_webui.env import REDIS_KEY_PREFIX
+    import json as _json
+
+    redis = getattr(app.state, "redis", None)
+    if not redis:
+        return
+    pubsub = redis.pubsub()
+    await pubsub.subscribe(f"{REDIS_KEY_PREFIX}:fn_reload")
+    try:
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                try:
+                    data = _json.loads(message["data"])
+                    await reload_function_in_memory(app, data["function_id"])
+                except Exception as e:
+                    log.error(f"Error processing fn_reload event: {e}")
+    except Exception as e:
+        log.error(f"PubSub listener error: {e}")
+    finally:
+        await pubsub.unsubscribe(f"{REDIS_KEY_PREFIX}:fn_reload")

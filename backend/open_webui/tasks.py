@@ -1,15 +1,20 @@
 # tasks.py
 import asyncio
-from typing import Dict
+import time
+from dataclasses import dataclass, field, asdict
+from enum import Enum
+from typing import Dict, List, Optional
 from uuid import uuid4
 import json
 import logging
 from redis.asyncio import Redis
-from fastapi import Request
-from typing import Dict, List, Optional
 
-from open_webui.env import REDIS_KEY_PREFIX
-
+from open_webui.env import (
+    REDIS_KEY_PREFIX,
+    SSO_TASK_TTL,
+    ZOMBIE_CLEANUP_GRACE_PERIOD,
+    ZOMBIE_CLEANUP_SCAN_INTERVAL,
+)
 log = logging.getLogger(__name__)
 
 # A dictionary to keep track of active tasks
@@ -20,6 +25,143 @@ item_tasks = {}
 REDIS_TASKS_KEY = f"{REDIS_KEY_PREFIX}:tasks"
 REDIS_ITEM_TASKS_KEY = f"{REDIS_KEY_PREFIX}:tasks:item"
 REDIS_PUBSUB_CHANNEL = f"{REDIS_KEY_PREFIX}:tasks:commands"
+
+
+####################################
+# SSO Task State
+####################################
+
+
+class TaskStatus(str, Enum):
+    QUEUED = "queued"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+@dataclass
+class TaskState:
+    task_id: str = field(default_factory=lambda: str(uuid4()))
+    chat_id: str = ""
+    message_id: str = ""
+    user_id: str = ""
+    worker_id: str = ""
+    status: TaskStatus = TaskStatus.QUEUED
+    created_at: float = field(default_factory=time.time)
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    error: Optional[str] = None
+    metadata: dict = field(default_factory=dict)
+    ttl: int = field(default_factory=lambda: SSO_TASK_TTL)
+
+
+SSO_INSTANCE_ID = str(uuid4())
+
+
+TASK_METRICS = {
+    "tasks_created": 0,
+    "tasks_completed": 0,
+    "tasks_failed": 0,
+    "tasks_cancelled": 0,
+    "tasks_timed_out": 0,
+    "tasks_zombie_cleaned": 0,
+    "task_duration_seconds": [],
+}
+
+
+def record_task_metric(metric: str, value=1):
+    """Record a task metric (per-worker)."""
+    if metric in TASK_METRICS:
+        if isinstance(TASK_METRICS[metric], list):
+            TASK_METRICS[metric].append(value)
+        else:
+            TASK_METRICS[metric] += value
+
+
+async def save_task_state(redis: Redis, task: TaskState, prefix: str):
+    """Save TaskState to Redis with TTL."""
+    key = f"{prefix}:task_state:{task.task_id}"
+    task_dict = asdict(task)
+    task_dict["metadata"] = json.dumps(task_dict["metadata"])
+    task_dict["status"] = task.status.value
+    await redis.hset(key, mapping={k: str(v) for k, v in task_dict.items()})
+    await redis.expire(key, task.ttl)
+    if task.message_id:
+        msg_key = f"{prefix}:task_by_message:{task.message_id}"
+        await redis.set(msg_key, task.task_id, ex=task.ttl)
+
+
+async def get_task_state(
+    redis: Redis, task_id: str, prefix: str
+) -> Optional[TaskState]:
+    """Retrieve TaskState from Redis. Converts types (Redis returns everything as str)."""
+    key = f"{prefix}:task_state:{task_id}"
+    data = await redis.hgetall(key)
+    if not data:
+        return None
+    return TaskState(
+        task_id=data.get("task_id", ""),
+        chat_id=data.get("chat_id", ""),
+        message_id=data.get("message_id", ""),
+        user_id=data.get("user_id", ""),
+        worker_id=data.get("worker_id", ""),
+        status=TaskStatus(data.get("status", "queued")),
+        created_at=float(data.get("created_at", 0)),
+        started_at=(
+            float(data["started_at"])
+            if data.get("started_at") not in (None, "None")
+            else None
+        ),
+        completed_at=(
+            float(data["completed_at"])
+            if data.get("completed_at") not in (None, "None")
+            else None
+        ),
+        error=data.get("error") if data.get("error") not in (None, "None") else None,
+        metadata=json.loads(data.get("metadata", "{}")),
+        ttl=int(data.get("ttl", 3600)),
+    )
+
+
+async def find_task_by_message_id(
+    redis: Redis, message_id: str, prefix: str
+) -> Optional[str]:
+    """Idempotency: return existing task_id for a message_id."""
+    key = f"{prefix}:task_by_message:{message_id}"
+    return await redis.get(key)
+
+
+async def periodic_zombie_cleanup(app):
+    """Scan Redis for PROCESSING tasks older than GRACE_PERIOD."""
+    while True:
+        await asyncio.sleep(ZOMBIE_CLEANUP_SCAN_INTERVAL)
+        try:
+            redis = app.state.redis
+            if not redis:
+                continue
+            prefix = REDIS_KEY_PREFIX
+            cursor = 0
+            while True:
+                cursor, keys = await redis.scan(
+                    cursor, match=f"{prefix}:task_state:*", count=100
+                )
+                for key in keys:
+                    data = await redis.hgetall(key)
+                    if data.get("status") == "processing":
+                        started = float(data.get("started_at", 0))
+                        if time.time() - started > ZOMBIE_CLEANUP_GRACE_PERIOD:
+                            task_id = data.get("task_id", "")
+                            log.warning(f"Zombie task detected: {task_id}")
+                            await redis.hset(key, "status", "failed")
+                            await redis.hset(
+                                key, "error", "Zombie: exceeded grace period"
+                            )
+                            await redis.hset(key, "completed_at", str(time.time()))
+                if cursor == 0:
+                    break
+        except Exception as e:
+            log.error(f"Zombie cleanup error: {e}")
 
 
 async def redis_task_command_listener(app):

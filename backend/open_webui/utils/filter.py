@@ -78,12 +78,15 @@ async def process_filter_functions(
         if filter_type == "inlet" and hasattr(function_module, "file_handler"):
             skip_files = function_module.file_handler
 
-        # Apply valves to the function
-        if hasattr(function_module, "valves") and hasattr(function_module, "Valves"):
-            valves = Functions.get_function_valves_by_id(filter_id)
-            function_module.valves = function_module.Valves(
-                **(valves if valves else {})
-            )
+        # Apply valves to the function (skip if preloaded — Valves already applied)
+        if not getattr(function_module, "_valves_preloaded", False):
+            if hasattr(function_module, "valves") and hasattr(
+                function_module, "Valves"
+            ):
+                valves = Functions.get_function_valves_by_id(filter_id)
+                function_module.valves = function_module.Valves(
+                    **(valves if valves else {})
+                )
 
         try:
             # Prepare parameters

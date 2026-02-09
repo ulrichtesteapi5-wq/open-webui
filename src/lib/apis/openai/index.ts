@@ -366,7 +366,7 @@ export const generateOpenAIChatCompletion = async (
 ) => {
 	let error = null;
 
-	const res = await fetch(`${url}/chat/completions`, {
+	const response = await fetch(`${url}/chat/completions`, {
 		method: 'POST',
 		headers: {
 			Authorization: `Bearer ${token}`,
@@ -374,21 +374,31 @@ export const generateOpenAIChatCompletion = async (
 		},
 		credentials: 'include',
 		body: JSON.stringify(body)
-	})
-		.then(async (res) => {
-			if (!res.ok) throw await res.json();
-			return res.json();
-		})
-		.catch((err) => {
-			error = err?.detail ?? err;
-			return null;
-		});
+	}).catch((err) => {
+		error = err?.detail ?? err;
+		return null;
+	});
 
 	if (error) {
 		throw error;
 	}
 
-	return res;
+	if (!response) {
+		throw 'Server connection failed';
+	}
+
+	if (!response.ok) {
+		try {
+			const errData = await response.json();
+			throw errData?.detail ?? errData;
+		} catch (err) {
+			if (typeof err === 'string') throw err;
+			throw 'Server connection failed';
+		}
+	}
+
+	const data = await response.json();
+	return { data, status: response.status, headers: response.headers };
 };
 
 export const synthesizeOpenAISpeech = async (

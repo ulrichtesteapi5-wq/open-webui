@@ -442,6 +442,28 @@ except ValueError:
     log.info(f"Invalid UVICORN_WORKERS value, defaulting to {UVICORN_WORKERS}")
 
 ####################################
+# SSO — Server-Side Orchestration
+####################################
+
+ENABLE_SERVER_SIDE_ORCHESTRATION = (
+    os.environ.get("ENABLE_SERVER_SIDE_ORCHESTRATION", "false").lower() == "true"
+)
+
+SSO_TASK_TTL = int(os.environ.get("SSO_TASK_TTL", "3600"))
+SSO_TASK_TIMEOUT = int(os.environ.get("SSO_TASK_TIMEOUT", "300"))
+ZOMBIE_CLEANUP_GRACE_PERIOD = int(os.environ.get("ZOMBIE_CLEANUP_GRACE_PERIOD", "600"))
+ZOMBIE_CLEANUP_SCAN_INTERVAL = int(
+    os.environ.get("ZOMBIE_CLEANUP_SCAN_INTERVAL", "3600")
+)
+
+####################################
+# LLM Provider Resilience
+####################################
+
+LLM_PROVIDER_RETRIES = int(os.environ.get("LLM_PROVIDER_RETRIES", "3"))
+LLM_PROVIDER_RETRY_DELAY = float(os.environ.get("LLM_PROVIDER_RETRY_DELAY", "2.0"))
+
+####################################
 # WEBUI_AUTH (Required for security)
 ####################################
 
@@ -742,10 +764,10 @@ except ValueError:
 
 REQUESTS_VERIFY = os.environ.get("REQUESTS_VERIFY", "True").lower() == "true"
 
-AIOHTTP_CLIENT_TIMEOUT = os.environ.get("AIOHTTP_CLIENT_TIMEOUT", "")
+AIOHTTP_CLIENT_TIMEOUT = os.environ.get("AIOHTTP_CLIENT_TIMEOUT", "300")
 
 if AIOHTTP_CLIENT_TIMEOUT == "":
-    AIOHTTP_CLIENT_TIMEOUT = None
+    AIOHTTP_CLIENT_TIMEOUT = 300
 else:
     try:
         AIOHTTP_CLIENT_TIMEOUT = int(AIOHTTP_CLIENT_TIMEOUT)

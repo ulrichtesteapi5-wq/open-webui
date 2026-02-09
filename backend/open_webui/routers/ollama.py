@@ -132,12 +132,42 @@ async def send_post_request(
             if metadata and metadata.get("chat_id"):
                 headers[FORWARD_SESSION_INFO_HEADER_CHAT_ID] = metadata.get("chat_id")
 
-        r = await session.post(
-            url,
-            data=payload,
-            headers=headers,
-            ssl=AIOHTTP_CLIENT_SESSION_SSL,
-        )
+        from open_webui.env import LLM_PROVIDER_RETRIES, LLM_PROVIDER_RETRY_DELAY
+
+        RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+        last_error = None
+        for attempt in range(1, LLM_PROVIDER_RETRIES + 1):
+            r = await session.post(
+                url,
+                data=payload,
+                headers=headers,
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+            )
+
+            if r.status in RETRYABLE_STATUS_CODES and attempt < LLM_PROVIDER_RETRIES:
+                last_error = f"HTTP {r.status}"
+                retry_after = r.headers.get("Retry-After")
+                delay = (
+                    float(retry_after)
+                    if retry_after
+                    else LLM_PROVIDER_RETRY_DELAY * attempt
+                )
+                await cleanup_response(r, None)
+                r = None
+                log.warning(
+                    f"Ollama retry {attempt}/{LLM_PROVIDER_RETRIES}: {last_error}, delay={delay}s"
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            break  # Success or non-retryable error
+
+        if r is None:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Open WebUI: All {LLM_PROVIDER_RETRIES} retries exhausted: {last_error}",
+            )
 
         if r.ok is False:
             try:

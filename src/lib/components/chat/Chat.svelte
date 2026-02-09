@@ -587,6 +587,13 @@
 		window.addEventListener('message', onMessageHandler);
 		$socket?.on('events', chatEventHandler);
 
+		// FASE 5.3: WebSocket rehydration — sync on reconnect
+		$socket?.on('connect', () => {
+			if ($chatId) {
+				$socket?.emit('message:sync', { chat_id: $chatId });
+			}
+		});
+
 		audioQueue.set(new AudioQueue(document.getElementById('audioElement')));
 
 		pageSubscribe = page.subscribe(async (p) => {
@@ -1307,6 +1314,21 @@
 				await chats.set(await getChatList(localStorage.token, $currentChatPage));
 			}
 		}
+	};
+
+	// FASE 5.4: Polling fallback for SSO task status
+	const pollTaskStatus = async (taskId: string, interval = 2000, maxAttempts = 150) => {
+		const { getTaskStatus } = await import('$lib/apis');
+		for (let i = 0; i < maxAttempts; i++) {
+			const status = await getTaskStatus(localStorage.token, taskId);
+			if (['completed', 'failed', 'cancelled'].includes(status.status)) {
+				return status;
+			}
+			await new Promise((r) => setTimeout(r, interval));
+		}
+		throw new Error(
+			`Polling timeout: task ${taskId} did not complete after ${maxAttempts} attempts`
+		);
 	};
 
 	const getChatEventEmitter = async (modelId: string, chatId: string = '') => {

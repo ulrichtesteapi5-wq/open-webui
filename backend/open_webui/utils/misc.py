@@ -91,8 +91,14 @@ def get_message_list(messages_map, message_id):
 
     # Reconstruct the chain by following the parentId links
     message_list = []
+    visited = set()
 
     while current_message:
+        msg_id = current_message.get("id")
+        if msg_id in visited:
+            log.error(f"Cycle detected in message history at {msg_id}")
+            break
+        visited.add(msg_id)
         message_list.insert(
             0, current_message
         )  # Insert the message at the beginning of the list

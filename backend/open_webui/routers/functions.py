@@ -20,6 +20,7 @@ from open_webui.utils.plugin import (
     replace_imports,
     get_function_module_from_cache,
     resolve_valves_schema_options,
+    notify_function_reload,
 )
 from open_webui.config import CACHE_DIR
 from open_webui.constants import ERROR_MESSAGES
@@ -235,6 +236,7 @@ async def create_new_function(
                 )
 
             if function:
+                await notify_function_reload(request.app, form_data.id)
                 return function
             else:
                 raise HTTPException(
@@ -281,7 +283,10 @@ async def get_function_by_id(
 
 @router.post("/id/{id}/toggle", response_model=Optional[FunctionModel])
 async def toggle_function_by_id(
-    id: str, user=Depends(get_admin_user), db: Session = Depends(get_session)
+    request: Request,
+    id: str,
+    user=Depends(get_admin_user),
+    db: Session = Depends(get_session),
 ):
     function = Functions.get_function_by_id(id, db=db)
     if function:
@@ -290,6 +295,7 @@ async def toggle_function_by_id(
         )
 
         if function:
+            await notify_function_reload(request.app, id)
             return function
         else:
             raise HTTPException(
@@ -364,6 +370,7 @@ async def update_function_by_id(
             Functions.update_function_metadata_by_id(id, {"toggle": True}, db=db)
 
         if function:
+            await notify_function_reload(request.app, id)
             return function
         else:
             raise HTTPException(
@@ -396,6 +403,7 @@ async def delete_function_by_id(
         FUNCTIONS = request.app.state.FUNCTIONS
         if id in FUNCTIONS:
             del FUNCTIONS[id]
+        await notify_function_reload(request.app, id)
 
     return result
 
@@ -486,6 +494,7 @@ async def update_function_valves_by_id(
 
                 valves_dict = valves.model_dump(exclude_unset=True)
                 Functions.update_function_valves_by_id(id, valves_dict, db=db)
+                await notify_function_reload(request.app, id)
                 return valves_dict
             except Exception as e:
                 log.exception(f"Error updating function values by id {id}: {e}")
