@@ -2447,6 +2447,30 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             request, form_data["messages"], sources, prompt
         )
 
+    # Inject PreProcessing suffix into last user message (deferred from filter).
+    # The PreProcessing filter (V2.7+) stores its suffix in metadata instead
+    # of appending to the user message directly, so the RAG search query
+    # (extracted above from user message content) stays clean.
+    # We inject the suffix here, AFTER RAG retrieval is complete, so the LLM
+    # still sees the full PreProcessing instructions.
+    _pp_suffix = metadata.get("preprocessing_suffix", "")
+    if _pp_suffix:
+        _pp_marker = "# SYSTEM: OUTPUT-CONSTITUTION"
+        for _msg in reversed(form_data.get("messages", [])):
+            if _msg.get("role") == "user":
+                _content = _msg.get("content", "")
+                if isinstance(_content, str) and _pp_marker not in _content:
+                    _msg["content"] = f"{_content}\n\n{_pp_suffix}"
+                elif isinstance(_content, list):
+                    for _item in _content:
+                        if (
+                            _item.get("type") == "text"
+                            and _pp_marker not in _item.get("text", "")
+                        ):
+                            _item["text"] = f"{_item['text']}\n\n{_pp_suffix}"
+                            break
+                break
+
     # If there are citations, add them to the data_items
     sources = [
         source
