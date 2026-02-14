@@ -1192,10 +1192,15 @@ async def generate_chat_completion(
                         yield first_bytes
                     async for chunk in stream_chunks_handler(content):
                         yield chunk
+
                 return _gen()
 
             return StreamingResponse(
-                stream_wrapper(r, session, prepend_handler if first_bytes else stream_chunks_handler),
+                stream_wrapper(
+                    r,
+                    session,
+                    prepend_handler if first_bytes else stream_chunks_handler,
+                ),
                 status_code=r.status,
                 headers=dict(r.headers),
             )

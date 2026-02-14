@@ -15,6 +15,7 @@ from open_webui.env import (
     ZOMBIE_CLEANUP_GRACE_PERIOD,
     ZOMBIE_CLEANUP_SCAN_INTERVAL,
 )
+
 log = logging.getLogger(__name__)
 
 # A dictionary to keep track of active tasks
@@ -95,7 +96,10 @@ async def save_task_state(redis: Redis, task: TaskState, prefix: str):
 async def get_task_state(
     redis: Redis, task_id: str, prefix: str
 ) -> Optional[TaskState]:
-    """Retrieve TaskState from Redis. Converts types (Redis returns everything as str)."""
+    """Retrieve TaskState from Redis.
+
+    Converts types (Redis returns everything as str).
+    """
     key = f"{prefix}:task_state:{task_id}"
     data = await redis.hgetall(key)
     if not data:

@@ -2463,9 +2463,8 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                     _msg["content"] = f"{_content}\n\n{_pp_suffix}"
                 elif isinstance(_content, list):
                     for _item in _content:
-                        if (
-                            _item.get("type") == "text"
-                            and _pp_marker not in _item.get("text", "")
+                        if _item.get("type") == "text" and _pp_marker not in _item.get(
+                            "text", ""
                         ):
                             _item["text"] = f"{_item['text']}\n\n{_pp_suffix}"
                             break

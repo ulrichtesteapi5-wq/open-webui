@@ -2,7 +2,7 @@ import os
 import re
 import subprocess
 import sys
-from importlib import util
+
 import types
 import tempfile
 import logging
@@ -101,7 +101,8 @@ def resolve_valves_schema_options(
             method = getattr(valves_class, options, None)
             if method is None or not callable(method):
                 log.warning(
-                    f"options '{options}' not found or not callable on {valves_class.__name__}"
+                    f"options '{options}' not found or not callable "
+                    f"on {valves_class.__name__}"
                 )
                 continue
 
@@ -356,7 +357,8 @@ def get_function_module_from_cache(request, function_id, load_from_db=True):
 
     if load_from_db:
         # Always load from the database by default
-        # This is useful for hooks like "inlet" or "outlet" where the content might change
+        # This is useful for hooks like "inlet" or "outlet"
+        # where the content might change
         # and we want to ensure the latest content is used.
 
         function = Functions.get_function_by_id(function_id)
